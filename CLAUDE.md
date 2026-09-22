@@ -13,6 +13,7 @@ Vagrantfile, or scripts; they grew unmaintainable. Re-derive everything fresh.
   carries its own scope, first slice, and acceptance criteria. Do not restate issue specifics here.
 - **Architecture:** `docs/`. Keep design decisions and rationale there, not in code comments or in
   this file. Add a doc when a decision is worth more than a sentence.
+  `docs/decisions.md` is the decision log; issues link to its entries instead of restating them.
 - **This file:** stable ground rules and layout only.
 
 ## Layout (built out over time)
