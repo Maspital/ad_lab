@@ -19,24 +19,28 @@ Vagrantfile, or scripts; they grew unmaintainable. Re-derive everything fresh.
 ## Layout (built out over time)
 
 ```
-controller/     # FastAPI control plane: API, RBAC, domain logic, lifecycle orchestration
-provisioning/   # provider abstraction, Packer image builds, OpenTofu (create/destroy)
-plugins/        # capability plugins ("things the AD can do") — the plugin contract + implementations
-webui/          # SPA: define / configure / control the lab
-docs/           # architecture docs and design rationale
-tests/          # unit tests (real-virtualization tests are opt-in, separate)
+src/adlab/              # the one installable Python package (CLI + API), see decisions.md D10
+  controller/           #   FastAPI control plane: API, RBAC, domain logic
+  provisioning/         #   provider interface + implementations, instance record, build orchestrator
+  plugins/              #   plugin contract + engine
+provisioning/           # non-Python provisioning assets: Packer templates, OpenTofu modules
+plugins/                # plugin bundles: manifest + Ansible content, discovered by the engine
+webui/                  # SPA: define / configure / control the lab
+docs/                   # architecture docs and design rationale
+tests/                  # unit tests (real-virtualization tests are opt-in, separate)
 ```
 
 ## Ground rules
 
 - **Provider is an interface, not a hardcode.** libvirt/KVM is the default; other providers
   (cloud/OpenStack) are additional implementations behind the same interface. Nothing outside
-  `provisioning/` should know which provider is in use.
+  `adlab.provisioning` and the `provisioning/` asset directory should know which provider is in use.
 - **OpenTofu does create/destroy only,** and only inside a provider implementation. Runtime VM
-  control (start/stop/reset/snapshot) goes through the provider interface, never OpenTofu — it
+  control (start/stop/reset) goes through the provider interface, never OpenTofu — it
   reconciles to desired state and fights out-of-band changes.
-- **One config document is the source of truth.** Nodes, networks, sizing, provider, host, and
-  enabled plugins with their parameters. Nothing else holds lab facts.
+- **One config document is the source of truth.** Nodes, networks, sizing, provider, and enabled
+  plugins with their parameters. Nothing else holds lab facts. Where an instance runs (its host)
+  is runtime state on the instance, not a lab fact.
 - **Every plugin ships a verifier.** A silent no-op reporting success is the worst failure mode.
   Plugin application is idempotent and records an applied-marker; "exit 0" is never proof it applied.
 - **Plugins declare their dependencies;** the engine orders them. Never hand-order a global stage list.

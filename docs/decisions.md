@@ -12,7 +12,9 @@ reverse it), **Consequences** (what it forces elsewhere).
 
 **Decision.** The controller is one Python package (`adlab`) that runs on an operator-controlled
 Linux machine: the laptop for standalone use, a small management VM for cloud/RDP deployments. It
-exposes a CLI (preflight, build, destroy, start/stop, snapshot, status) and the FastAPI service.
+exposes a CLI (preflight, build, destroy, rebuild, start/stop, reset, status) and the FastAPI
+service. (Verb list amended 2026-09-22 per the D3 amendment: `reset` added, user-facing `snapshot`
+removed.)
 The controller is **not** modelled as a node in the lab config.
 
 **Why.** The earlier "controller as a topology node" idea conflated two things: students must be
@@ -74,6 +76,14 @@ not support internal snapshots of pflash-firmware VMs, so the spike must settle 
 snapshots or a libvirt version that handles it. OpenTofu must not track anything a snapshot revert
 changes (see D5). Plugins are still idempotent — rebuild depends on it — but reset does not
 exercise them.
+
+**Amendment (2026-09-22): golden is the only snapshot.** There is no user-facing `snapshot` verb
+in the CLI, the API (#6) or the UI (#7). `reset` always means "revert to golden". The provider
+interface keeps `snapshot`/`revert` as primitives because the orchestrator uses them to take and
+revert the golden snapshot. *Why:* a user-taken snapshot would leave "what does reset revert to"
+undefined, and external-snapshot chains on UEFI guests are the hardest part of the Windows path;
+nobody has asked for mid-exercise checkpoints. Named user snapshots can be added later without
+breaking anything as long as golden stays the fixed base.
 
 ## D4 — One guest transport: OpenSSH, including on Windows (2026-09-22)
 
@@ -149,7 +159,111 @@ would be speculative design.
   block as an opaque mapping keyed by plugin name; the plugin framework (epic #4) adds the hook
   that validates it against the plugin's own schema.
 - **Host budget guard** lives in provisioning (epic #3), which has host facts. The schema
-  validates only internal consistency (node refs, unknown plugins, sum of declared sizes against
-  an optional declared budget).
+  validates only internal consistency (node refs, sum of declared sizes against an optional
+  declared budget). *(Amended 2026-09-22:)* the unknown-plugin check needs a plugin registry,
+  which only the plugin framework (epic #4) has; #4 adds it together with the parameter-validation
+  hook. Epic #2 does not check plugin names.
 - **HCP Vagrant dates.** HashiCorp's notice: no new boxes or registries after 1 Oct 2026;
   decommissioned 31 Dec 2026. The old lab's box dependency is dead by the end of 2026 either way.
+
+## D10 — One Python package; asset directories stay top-level (2026-09-22)
+
+**Decision.** All Python lives in one package at `src/adlab/` with subpackages `controller`,
+`provisioning` and `plugins` that mirror the layout in `CLAUDE.md`. The top-level `provisioning/`
+and `plugins/` directories hold non-Python assets only: Packer templates and OpenTofu modules under
+`provisioning/`, plugin bundles (manifest plus Ansible content) under `plugins/`. There is no
+top-level `controller/` directory; the control plane is `adlab.controller`.
+
+**Why.** The `adlab` CLI and API must import the provider runtime classes and the plugin engine,
+so Python spanning three top-level directories would need either three packages or a
+`package-dir` mapping that editable installs, mypy and pytest handle poorly. One `src/` package
+is what every tool expects. Putting provider classes inside the controller instead would break
+the rule that nothing outside provisioning knows which provider is in use.
+
+**Consequences.** The "nothing outside `provisioning/` knows the provider" rule applies to both
+`adlab.provisioning` and the asset directory. The Windows spike's Packer template (#11) lands in
+`provisioning/packer/` as planned. `pyproject.toml` sits at the repo root.
+
+## D11 — The instance record, the build orchestrator and placement belong to provisioning (2026-09-22)
+
+**Decision.** Epic #3 owns three things that M1 needs and that were previously assigned to the
+M2 API epic:
+
+1. A **minimal instance record** in SQLite: id, name, the config it was built from, its lifecycle
+   state (D3), and its **host** (`localhost` in M1). Epic #6 adds `owner` and jobs; epic #8 makes
+   the host selectable.
+2. The **build orchestrator**: the code that drives an instance through D3's states —
+   `create_instance` → wait for SSH → *plugin application hook* → golden snapshot → `ready` — and
+   the `destroy` and `rebuild` sequences. Epic #4 fills the plugin hook; it does not own the
+   sequence.
+3. **The empty plugin set is trivially `configured`.** With no plugins enabled, `configured`
+   follows `provisioned` immediately, so #3 alone takes golden snapshots and tests `reset` before
+   #4 exists.
+
+**Placement is an instance attribute, not a config fact.** The lab config document carries no
+`host` field.
+
+**Why.** `adlab build` (M1) creates an instance, OpenTofu state is kept per instance, and plugin
+applied-markers are keyed by instance, so an instance identity cannot wait for M2. Without an
+owner for the orchestrator, #3 and #4 each half-own it and #3's golden-snapshot step cannot be
+tested until #4 lands (a hidden cycle: #4 depends on #3). On a central server the same config
+builds N instances, and an instructor may build a test instance locally from that same config;
+where an instance runs is runtime state (D7), not a description of the lab.
+
+**Consequences.** `CLAUDE.md`'s "one config document" rule no longer lists host. Epic #2 and its
+slice #13 drop the `host` field. Epic #6's first slice is "jobs and the API over #3's instance
+model", not "instance + job model". Epic #8 assigns a host to an instance at creation.
+
+## D12 — Concurrency model: async FastAPI, blocking work off the event loop (2026-09-22)
+
+**Decision.** The API is async FastAPI. Anything that blocks — libvirt calls, `tofu`, `packer`,
+Ansible, SSH — runs off the event loop (thread pool or subprocess), never inline in a request
+handler. The CLI drives the same domain code synchronously.
+
+**Why.** libvirt-python and the external binaries are blocking; one build inline would freeze
+every other request, including the health check and streaming job logs that #6 needs.
+
+## D13 — The SPA is served same-origin by the API (2026-09-22)
+
+**Decision.** The FastAPI app serves the built SPA as static files from `webui/dist` on the same
+origin as the API. No separate web server, no CORS configuration in the default deployment.
+
+**Why.** One process to run and one port to expose keeps the operator-facing surface (D1) a
+single bind address, and it removes a class of cookie and CORS problems for the auth slice of #6.
+
+## D14 — Toolchain for the controller package (2026-09-22)
+
+- **CLI framework:** Typer (Click underneath). Sub-apps give `adlab config …`, `adlab …` groups
+  for free and the type-hint style matches Pydantic.
+- **Project tool:** `uv`, with `uv.lock` committed. The package stays plain `pip install -e .`
+  compatible; `uv` is a convenience, not a requirement.
+- **Type checking:** mypy on the package, non-strict, in pre-commit and CI.
+- **Python:** 3.12 only in CI.
+- **Lint/format:** ruff. **Tests:** pytest.
+
+## D15 — Config schema clarifications (2026-09-22)
+
+- **`role` is a closed `StrEnum`** (`dc`, `member-server`, `workstation`, `attacker`,
+  `logserver`). Extending it means adding a member. A free string would lose the JSON Schema
+  `enum` the web UI's forms depend on.
+- **`os` is `windows | linux`; `image` is a free string** naming a Packer image. Consumers need
+  the shell family (PowerShell vs sh for Ansible) and which image to boot; an `os.version` would
+  duplicate what the image name carries. No cross-validation of `image` until #3 owns an image
+  list.
+- **`domain` is required** for `dc`, `member-server` and `workstation`; **optional** for
+  `attacker` and `logserver`. No plugin joins Linux to the domain and none is scoped to.
+- **Static addressing.** A node's network attachment is `{network, ip}` with `ip` optional,
+  validated inside the network's CIDR and unique per network. The default fixture pins all five
+  nodes. The provider (#3) realises pins as libvirt DHCP host reservations, so `dhcp` stays on.
+  *Why:* the DC is the members' DNS server; a fresh DHCP lease after a golden-snapshot reset must
+  not move it.
+- **Default network mode is `nat`.** A libvirt NAT network is private from the LAN, the host
+  reaches guests over the bridge, and guests have egress for package installs at plugin time
+  (collector on the logserver, Kali updates). `isolated` stays available; choosing it means every
+  package must be baked by Packer.
+- **The generation seed is a secret.** Users, groups and share content in #5 derive from a seed;
+  the seed is a secret-marked config field (#2, second slice) and is stripped from student
+  exports, otherwise the export reproduces every password.
+- **Small fixed values.** `schema_version` is an integer starting at 1. The default fixture
+  ships as package data so `adlab config show` works outside a checkout. The libvirt provider
+  block has no required keys in #13. The default fixture declares `budget.ram_mb: 20480`.
