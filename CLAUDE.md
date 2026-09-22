@@ -36,8 +36,8 @@ tests/                  # unit tests (real-virtualization tests are opt-in, sepa
   (cloud/OpenStack) are additional implementations behind the same interface. Nothing outside
   `adlab.provisioning` and the `provisioning/` asset directory should know which provider is in use.
 - **OpenTofu does create/destroy only,** and only inside a provider implementation. Runtime VM
-  control (start/stop/reset) goes through the provider interface, never OpenTofu — it
-  reconciles to desired state and fights out-of-band changes.
+  control (start/stop/reset) goes through the provider interface, never OpenTofu (rationale and
+  the kill criterion: decisions.md D5).
 - **One config document is the source of truth.** Nodes, networks, sizing, provider, and enabled
   plugins with their parameters. Nothing else holds lab facts. Where an instance runs (its host)
   and which CIDRs its networks actually use are runtime state on the instance, not lab facts.
