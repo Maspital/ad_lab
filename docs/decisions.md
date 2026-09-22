@@ -29,6 +29,13 @@ anyway.
 logserver). The CLI is a first-class deliverable of the scaffolding epic and the M1 driver. The API
 binds only to the operator-facing interface, never to the lab bridge, so guests cannot reach it.
 
+**Amendment (2026-09-22): start/stop/reset act on a VM or on the whole instance.** Each verb
+takes a VM name or, without one, applies to every VM of the instance. Instance-level `reset`
+(revert every VM to golden) is the student's fast "start over"; `rebuild` stays the slow path for
+a changed config. *Why:* the operator's daily action on a laptop is "stop the lab", and the
+student's is "start the exercise over"; both are loops over the per-VM primitives and cost
+nothing to expose.
+
 ## D2 — Ownership is per lab instance; two deployment models (2026-09-22)
 
 **Decision.** The unit of ownership and of lifecycle actions is the **lab instance**. Two
@@ -84,6 +91,22 @@ revert the golden snapshot. *Why:* a user-taken snapshot would leave "what does 
 undefined, and external-snapshot chains on UEFI guests are the hardest part of the Windows path;
 nobody has asked for mid-exercise checkpoints. Named user snapshots can be added later without
 breaking anything as long as golden stays the fixed base.
+
+**Amendment (2026-09-22): a `ready` instance is immutable with respect to its config.** Enabling,
+disabling or reconfiguring a plugin edits the config document; a built instance picks the change
+up only through `rebuild`. There is no reconfigure-in-place transition. *Why:* the golden snapshot
+is taken at `configured`; applying more plugins afterwards would either invalidate golden or
+require a second snapshot generation, and #6's "plugin enable/configure" would otherwise invite
+exactly that feature.
+
+**Note (2026-09-22): golden state and revert.** Golden is the disk *plus* the UEFI nvram file
+*plus* the swtpm state, never the qcow2 alone; the spike (#11) fixes the mechanism and the
+minimum libvirt version (Ubuntu 24.04 ships 10.0.0, which supports neither internal snapshots
+of UEFI guests nor external disk-only revert). Windows domains carry `<genid/>` so a revert of a
+DC takes AD's VM-Generation-ID safe-restore path. Known limit: a domain member reverted to golden
+after its machine-account password has rotated twice on the DC (default interval 30 days, so
+roughly 60+ days of instance uptime) loses its domain trust; course-length labs never reach it,
+and `rebuild` recovers.
 
 ## D4 — One guest transport: OpenSSH, including on Windows (2026-09-22)
 
@@ -254,9 +277,12 @@ single bind address, and it removes a class of cookie and CORS problems for the 
   `attacker` and `logserver`. No plugin joins Linux to the domain and none is scoped to.
 - **Static addressing.** A node's network attachment is `{network, ip}` with `ip` optional,
   validated inside the network's CIDR and unique per network. The default fixture pins all five
-  nodes. The provider (#3) realises pins as libvirt DHCP host reservations, so `dhcp` stays on.
+  nodes. The provider (#3) realises pins as libvirt DHCP host reservations; DHCP is always on and
+  the schema has no toggle for it *(amended 2026-09-22: nothing implements the off branch)*.
   *Why:* the DC is the members' DNS server; a fresh DHCP lease after a golden-snapshot reset must
-  not move it.
+  not move it. The fixture CIDR must not collide with libvirt's stock `default` network
+  (192.168.122.0/24); libvirt refuses to start a network whose subnet overlaps one already on the
+  host.
 - **Default network mode is `nat`.** A libvirt NAT network is private from the LAN, the host
   reaches guests over the bridge, and guests have egress for package installs at plugin time
   (collector on the logserver, Kali updates). `isolated` stays available; choosing it means every
