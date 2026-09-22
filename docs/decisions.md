@@ -11,7 +11,8 @@ reverse it), **Consequences** (what it forces elsewhere).
 ## D1 — The controller is a service, not a lab node (2026-09-22)
 
 **Decision.** The controller is one Python package (`adlab`) that runs on an operator-controlled
-Linux machine: the laptop for standalone use, a small management VM for cloud/RDP deployments. It
+Linux machine: the laptop for standalone use, the KVM host itself in the central-server model
+(D17), a small management VM for cloud deployments. It
 exposes a CLI (preflight, build, destroy, rebuild, start/stop, reset, status) and the FastAPI
 service. (Verb list amended 2026-09-22 per the D3 amendment: `reset` added, user-facing `snapshot`
 removed.)
@@ -263,6 +264,12 @@ single bind address, and it removes a class of cookie and CORS problems for the 
 - **Type checking:** mypy on the package, non-strict, in pre-commit and CI.
 - **Python:** 3.12 only in CI.
 - **Lint/format:** ruff. **Tests:** pytest.
+- **Ansible** *(added 2026-09-22)*: `ansible-core` is a pinned Python dependency of the `adlab`
+  package; collections (`ansible.windows`, `community.windows`, …) come from a committed
+  `requirements.yml` installed at setup. It is not a host binary and preflight does not check for
+  it. *Why:* distro `ansible-core` versions vary widely and Windows-over-SSH support is version
+  sensitive; one pinned version in the venv is reproducible. Whether the engine calls it via
+  `ansible-runner` or a subprocess is #4's call.
 
 ## D15 — Config schema clarifications (2026-09-22)
 
@@ -293,3 +300,58 @@ single bind address, and it removes a class of cookie and CORS problems for the 
 - **Small fixed values.** `schema_version` is an integer starting at 1. The default fixture
   ships as package data so `adlab config show` works outside a checkout. The libvirt provider
   block has no required keys in #13. The default fixture declares `budget.ram_mb: 20480`.
+
+## D16 — Per-instance network CIDR override (2026-09-22)
+
+**Decision.** The CIDR in the config document is the network's *default*. At instance creation
+each network's CIDR may be overridden; the override is stored on the instance record next to
+`host` (D11) and is an instance attribute, never a config fact. Pinned node IPs (D15) keep their
+host part and are rebased onto the effective prefix. The provider renders the OpenTofu module
+from the instance's effective networks, never from the config directly. Standalone use never sets
+an override; #8 chooses one per instance on a central server.
+
+**Why.** libvirt refuses to start a network whose subnet overlaps one already routed on the host
+(`Network is already in use by interface virbrX`), and isolated mode does not escape the check
+because the bridge still carries the gateway address for DHCP. So N instances of one config on
+one KVM host (D2, D11) cannot share a CIDR. Deriving N configs by hand contradicts "the same
+config builds N instances"; an automatic pool allocator needs pool configuration and allocation
+state for a problem the operator can solve with one field.
+
+**Consequences.** The instance record (#3) grows a per-network CIDR override field. #13's
+`IPv4Address` pins are unchanged; the rebase happens in provisioning. The fixture CIDR must not
+collide with libvirt's stock `default` network (D15). The pool allocator can be added later on
+top of the override without breaking anything.
+
+## D17 — Central-server model: the controller runs on the KVM host (2026-09-22)
+
+**Decision.** In the central-server deployment (D2), the `adlab` controller runs on the KVM host
+itself, not on a separate management VM. The management-VM wording in D1 is the cloud case. Epic
+#8 owns everything about reaching guests behind their per-instance NAT networks: plugin SSH from
+the controller, ProxyJump via the host's SSH for a genuinely remote KVM host, and the student
+access path (a libvirt graphical console proxied through the controller, or documented RDP port
+forwarding; the slice decides).
+
+**Why.** Guests on a NAT network are reachable only from the host that owns the bridge. A
+controller anywhere else needs an SSH hop for every plugin run and log stream, and students'
+machines cannot reach a NAT'd workstation at all. Running on the host collapses the first
+problem; the second needs a deliverable, and until now no epic owned it (#7 had it as an open
+question, #8 as a constraint).
+
+**Consequences.** D1 amended. #8 gains a student-access slice and states the reach model. The
+API's bind rule (D1: operator-facing interface only, never the lab bridge) matters more, not
+less, on a host that also carries every lab bridge.
+
+## D18 — Windows evaluation clock: rearm plugin and image-age warning (2026-09-22)
+
+**Decision.** A small weakness-free base plugin (#5) runs `slmgr /rearm` on every Windows node
+before the golden snapshot and verifies the remaining evaluation days. Provisioning (#3) records
+an image's build date and its budget guard warns when a Windows image is older than the
+evaluation period minus a margin. The spike (#11) documents the eval length and the rearm limit.
+
+**Why.** Evaluation media expire a fixed number of days after installation, which is the Packer
+build, not the instance build; a golden snapshot freezes nothing about that clock. An image built
+once and used months later hands a course a lab that dies mid-way. Rearming is an in-guest change
+and so belongs in a plugin with a verifier, not in the orchestrator.
+
+**Consequences.** #5 gains a slice; #3's budget guard gains a check; the image metadata carries
+a build date. Rearms are finite, so the warning still matters after the plugin exists.

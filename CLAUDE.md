@@ -40,7 +40,7 @@ tests/                  # unit tests (real-virtualization tests are opt-in, sepa
   reconciles to desired state and fights out-of-band changes.
 - **One config document is the source of truth.** Nodes, networks, sizing, provider, and enabled
   plugins with their parameters. Nothing else holds lab facts. Where an instance runs (its host)
-  is runtime state on the instance, not a lab fact.
+  and which CIDRs its networks actually use are runtime state on the instance, not lab facts.
 - **Every plugin ships a verifier.** A silent no-op reporting success is the worst failure mode.
   Plugin application is idempotent and records an applied-marker; "exit 0" is never proof it applied.
 - **Plugins declare their dependencies;** the engine orders them. Never hand-order a global stage list.
