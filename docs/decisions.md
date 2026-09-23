@@ -98,9 +98,10 @@ cheap); `destroy` and `rebuild` are valid from every state. Plugin applied-marke
 with the instance row.
 
 **Golden state.** Golden is the guest disk *plus* the UEFI nvram *plus* the swtpm state, never
-the qcow2 alone. libvirt's own snapshot paths do not cover all three: neither internal nor
-external snapshots include swtpm state, and external snapshots do not include nvram. The spike
-(#11) therefore decides the mechanism, the minimum libvirt version, **whether golden can exclude
+the qcow2 alone. Disk-only snapshots carry no swtpm state and external snapshots no nvram; a
+*live* internal snapshot may carry both in the vmstate (QEMU's TPM emulator supports
+snapshotting), which is the first candidate #11 tests. The spike (#11) therefore decides the
+mechanism, the minimum libvirt version, **whether golden can exclude
 the swtpm state** (tolerable only if nothing in the guest depends on the TPM after revert) and
 **the controller's privilege model** (which files under `/var/lib/libvirt` it may touch, if any).
 That result becomes a decision entry before #3's snapshot slice.
@@ -148,9 +149,11 @@ or passes explicit module credentials. The spike (#11) confirms both paths.
 VMs. It is invoked **inside** the provider implementation's `create_instance`/`destroy_instance`;
 nothing outside `adlab.provisioning` and `provisioning/` knows OpenTofu exists. Runtime actions
 (`start`, `stop`, `snapshot`, `revert`, `address`, `status`) go through the provider's own
-runtime calls (libvirt API), never through OpenTofu. The libvirt OpenTofu provider is pinned at
-0.9.1 or newer (the first version that undefines with the NVRAM and TPM flags and exposes
-firmware, nvram format, generation id and TPM natively).
+runtime calls (libvirt API), never through OpenTofu. The OpenTofu libvirt provider plugin
+(`dmacvicar/libvirt`) is pinned to an **exact** version, chosen by #11 Q6 and recorded in the D5
+verdict entry; 0.9.1 is the floor (the first version that undefines with the NVRAM and TPM flags
+and exposes firmware, nvram format, generation id and TPM natively), and the 0.9 line is a
+ground-up rewrite still changing between releases, so `>=` is not a pin.
 
 **Considered alternative: libvirt-python for create/destroy too.** The smoke path (#1) will
 create a domain, network, volume and cloud-init seed with raw libvirt-python, and the provider's
@@ -254,7 +257,8 @@ the rule that nothing outside provisioning knows which provider is in use.
 
 **Decision.** Epic #3 owns three things that M1 needs:
 
-1. The **instance record** in SQLite: id, unique name, a frozen copy of the config it was built
+1. The **instance record** in SQLite: id, unique name, a reference to its source config (a path
+   in M1; a stored config's id once #6 has config CRUD), a frozen copy of the config it was built
    from (so "config changed since build" is decidable), lifecycle state and failure detail (D3),
    the **host** (`localhost` in M1; selectable in #8), the per-network CIDR overrides (D16), and
    the image versions it was built from (D21). Epic #6 adds `owner` and jobs.
@@ -271,8 +275,9 @@ the rule that nothing outside provisioning knows which provider is in use.
 <instance>` drives it to `ready`, or resumes it. `adlab build <config>` without an instance does
 both and names the instance after the config. `destroy` removes the VMs and the record, reading
 only the OpenTofu state and the instance-prefixed provider objects, never the frozen config.
-`rebuild <instance> [config]` is destroy plus build on the same record from the given document,
-defaulting to the frozen copy; image versions are re-resolved to the newest in the image store
+`rebuild <instance> [config]` is destroy plus build on the same record from the *current* source
+config (that is how a config edit reaches a built instance, D3), or from the given document,
+which then becomes the source; image versions are re-resolved to the newest in the image store
 (D21) and re-recorded.
 
 **Instance-scoped resource names.** Every provider object an instance creates (domains, networks,
@@ -485,7 +490,8 @@ non-enrolled vars template exists.
 *2026-09-22*
 
 **Decision.** Packer bakes a **build key** and a build-time local administrator password into
-every image; both are throwaway. At the orchestrator's "wait for SSH" step, before any plugin
+every image; both are throwaway. The build key is a committed repo asset; the image store (D21)
+records its fingerprint per image version so the swap picks the matching key. At the orchestrator's "wait for SSH" step, before any plugin
 runs, the controller generates a **per-instance SSH keypair** and stores it before touching any
 guest, then runs an idempotent per-guest swap: connect with the per-instance key, else the build
 key; ensure the per-instance public key (`administrators_authorized_keys` on Windows,
@@ -501,7 +507,8 @@ password, never the seed and never the SSH key.
 including the attacker seat, can SSH into the DC as administrator) or generated per controller
 (then images are bound to one controller and break the "build once, use for months" story of
 D18). Windows has no cloud-init to inject a key at first boot, so the swap has to happen over the
-build key. Without a defined credential path a student on a central server has no way to log in
+build key, and the swap is what makes a committed key acceptable: it is gone from every guest
+before golden, and #5's proxy check asserts that. Without a defined credential path a student on a central server has no way to log in
 to their own instance, because everything else is sealed.
 
 **Consequences.** #3 slice 1 owns the swap; #3's Packer templates own the build key. #5's
@@ -516,7 +523,7 @@ sealing slice owns the student-credentials response. `rebuild` rotates the per-i
 **Decision.** An instance's disks are qcow2 overlays whose backing file is the Packer image.
 Images are therefore immutable: a Packer rebuild produces a new image version, never an in-place
 replacement. The image store (owned by #3) records for each image its name, version, build date
-(D18), source ISO and checksum; `adlab image list` shows it; `node.image` is cross-validated
+(D18), source ISO and checksum, and build-key fingerprint (D20); `adlab image list` shows it; `node.image` is cross-validated
 against it; the instance record pins the image versions it was built from.
 
 **Image invariants.** Every image boots on libvirt from a pristine OVMF vars template and an
